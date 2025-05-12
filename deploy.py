@@ -8,580 +8,448 @@ import pandas as pd
 import numpy as np
 
 # --- Configuration & Initialization ---
-st.set_page_config(layout="wide", page_title="Intelligent Call Campaign System")
+st.set_page_config(layout="wide", page_title="Intelligent Event Campaign System")
 
-# Constants for Simulation
-AGENT_SKILLS = ["General Sales", "High-Value Sales", "Retention", "Lead Nurturing"]
-LEAD_SOURCES = ["Website Signup", "Webinar Attendee", "Past Purchase", "Cold List"]
-CAMPAIGN_GOALS = ["Lead Generation", "Sales Conversion", "Customer Retention", "Product Awareness"]
-CALL_OUTCOMES = {
-    "No Answer": 0.3,
-    "Not Interested": 0.25,
-    "Follow-up Required": 0.2,
-    "Interested - No Sale Yet": 0.15,
-    "Sale Made": 0.1 # Base probability, will be modified
-}
+# Constants
+EVENT_TYPES = ["Webinar", "Workshop", "Conference (Virtual)", "Product Launch", "Networking Mixer"]
+PROMO_CHANNELS = ["Email Blast", "Social Media Organic", "Social Media Paid", "Partner Promotion", "Website Banner"]
+AUDIENCE_INTEREST_TAGS = ["Tech", "Marketing", "Sales", "Finance", "HR", "Startups", "Enterprise", "AI", "Sustainability"]
 
-# Session State Initialization
-if 'campaign_sys_initialized' not in st.session_state:
-    st.session_state.gemini_api_key_campaign = "" # Will be replaced by st.secrets if deployed
-    st.session_state.campaigns = []
-    st.session_state.leads = [] # List of dictionaries for leads
-    st.session_state.agents = [] # List of dictionaries for agents
-    st.session_state.call_log = [] # Log of all simulated calls
-    st.session_state.campaign_performance = {} # campaign_id -> {metrics}
-    st.session_state.simulation_time_campaign = datetime.now().replace(hour=9, minute=0, second=0, microsecond=0)
-    st.session_state.simulation_running_campaign = False
-    st.session_state.next_lead_id = 1
-    st.session_state.next_agent_id_campaign = 1
-    st.session_state.next_campaign_id = 1
-    st.session_state.system_log_campaign = []
-    st.session_state.campaign_sys_initialized = True
-    st.session_state.ai_recommendations = ""
+# Session State
+if 'event_mgmt_sys_initialized' not in st.session_state:
+    st.session_state.gemini_api_key_event = "" # For local testing, use st.secrets for deployment
+    st.session_state.events = [] # List of event campaign dicts
+    st.session_state.audience_pool = [] # List of potential attendee dicts
+    st.session_state.event_registrations = {} # event_id -> set of audience_ids
+    st.session_state.event_attendance = {} # event_id -> set of audience_ids (attended)
+    st.session_state.event_performance_metrics = {} # event_id -> dict of metrics
+    st.session_state.system_time = datetime.now().replace(hour=9, minute=0, second=0, microsecond=0)
+    st.session_state.simulation_running_event = False
+    st.session_state.next_event_id_counter = 1
+    st.session_state.next_audience_id_counter = 1
+    st.session_state.system_log_event = []
+    st.session_state.ai_event_recommendations = ""
+    st.session_state.event_mgmt_sys_initialized = True
 
-# --- Helper & Core Logic Functions ---
-
-def log_event_campaign(message):
-    timestamp = st.session_state.simulation_time_campaign.strftime("%Y-%m-%d %H:%M")
+# --- Helper Functions ---
+def log_event_activity(message):
+    timestamp = st.session_state.system_time.strftime("%Y-%m-%d %H:%M")
     entry = f"[{timestamp}] {message}"
-    st.session_state.system_log_campaign.append(entry)
-    if len(st.session_state.system_log_campaign) > 30:
-        st.session_state.system_log_campaign.pop(0)
+    st.session_state.system_log_event.append(entry)
+    if len(st.session_state.system_log_event) > 30:
+        st.session_state.system_log_event.pop(0)
 
-def get_gemini_campaign_response(prompt_text, temperature=0.6, max_tokens=500):
-    """Generates response from Gemini, using secrets for API key if available."""
+def get_gemini_event_response(prompt_text, temperature=0.7, max_tokens=600):
     try:
-        # Try to get API key from Streamlit secrets first
-        api_key_to_use = st.secrets.get("gemini_api") if hasattr(st, 'secrets') and "gemini_api" in st.secrets else st.session_state.gemini_api_key_campaign
-
+        api_key_to_use = st.secrets.get("gemini_api") if hasattr(st, 'secrets') and "gemini_api" in st.secrets else st.session_state.gemini_api_key_event
         if not api_key_to_use:
-            st.error("Gemini API Key not configured. Please set it in Streamlit secrets as 'gemini_api' or enter it manually.")
+            st.error("Gemini API Key not configured. Set 'gemini_api' in Streamlit secrets or enter manually.")
             return None
 
         genai.configure(api_key=api_key_to_use)
         model = genai.GenerativeModel('gemini-1.5-flash-latest')
-        generation_config = genai.types.GenerationConfig(
-            temperature=temperature,
-            max_output_tokens=max_tokens
-        )
-        # Prepend a role for better context
+        generation_config = genai.types.GenerationConfig(temperature=temperature, max_output_tokens=max_tokens)
+        
         full_prompt = (
-            "You are an AI expert in call campaign management and optimization. "
-            "Analyze the provided campaign data and offer actionable insights and recommendations. "
-            "Focus on improving customer engagement, profit, and revenue.\n\n"
+            "You are an AI expert in event campaign management and marketing. "
+            "Analyze the provided event data and offer actionable insights, content ideas, and strategic recommendations. "
+            "Focus on improving registrations, attendance, engagement, and overall event ROI.\n\n"
             f"{prompt_text}"
         )
         response = model.generate_content(full_prompt, generation_config=generation_config)
-
-        if response.parts:
-            return response.text
-        else:
-            block_reason = response.prompt_feedback.block_reason if response.prompt_feedback else "Unknown"
-            st.warning(f"Gemini AI: No content or blocked. Reason: {block_reason}")
-            log_event_campaign(f"Gemini AI: No content or blocked. Reason: {block_reason}")
-            return None
+        return response.text if response.parts else None
     except Exception as e:
         st.error(f"Gemini API Error: {e}")
-        log_event_campaign(f"Gemini API Error: {e}")
+        log_event_activity(f"Gemini API Error: {e}")
         return None
 
-def generate_random_lead():
-    lead_id = f"L{st.session_state.next_lead_id:04d}"
-    st.session_state.next_lead_id += 1
-    base_score = random.randint(30, 90) # General propensity score
-    source = random.choice(LEAD_SOURCES)
-    if source == "Past Purchase": base_score += 10
-    if source == "Webinar Attendee": base_score += 5
-    
-    lead = {
-        "id": lead_id,
-        "name": f"Lead {lead_id}",
-        "source": source,
-        "profile_score": min(100, base_score + random.randint(-5, 5)), # 0-100
-        "last_contact_date": None,
-        "status": "New", # New, Contacted, Nurturing, Converted, Lost
-        "assigned_campaign_id": None,
-        "priority_score": 0, # Will be calculated by agentic AI
-        "potential_value": random.randint(50, 1000) # Potential revenue if converted
+def generate_random_audience_member():
+    audience_id = f"AU{st.session_state.next_audience_id_counter:04d}"
+    st.session_state.next_audience_id_counter += 1
+    member = {
+        "id": audience_id,
+        "name": f"Audience {audience_id}",
+        "interest_tags": random.sample(AUDIENCE_INTEREST_TAGS, k=random.randint(1, 3)),
+        "engagement_score": random.randint(20, 90), # General engagement with brand/past events
+        "potential_value": random.randint(100, 2000) if random.random() < 0.3 else 0, # Potential if they become a customer
+        "last_promo_interaction_days_ago": random.randint(5, 90)
     }
-    return lead
+    return member
 
-def add_agent_campaign(name, skills):
-    agent_id = f"A{st.session_state.next_agent_id_campaign:03d}"
-    st.session_state.next_agent_id_campaign += 1
-    st.session_state.agents.append({
-        "id": agent_id, "name": name, "skills": skills,
-        "status": "Available", # Available, On Call, Wrap-up
-        "current_call_id": None,
-        "calls_made_today": 0,
-        "successful_conversions": 0,
-    })
-    log_event_campaign(f"Agent {name} ({skills}) added.")
+def create_event_campaign(name, event_type, target_audience_desc, goals, content_highlights, promo_channels, budget, event_date_offset_days=30):
+    event_id = f"EVT{st.session_state.next_event_id_counter:03d}"
+    st.session_state.next_event_id_counter += 1
+    event_date = st.session_state.system_time + timedelta(days=event_date_offset_days)
+    # Define key dates relative to event_date
+    promo_start_date = event_date - timedelta(days=21)
+    early_bird_ends_date = event_date - timedelta(days=14)
+    reminder_1_date = event_date - timedelta(days=3)
+    reminder_2_date = event_date - timedelta(days=1)
 
-def create_campaign(name, goal, target_segment_desc, offer_details, target_leads_count=50):
-    campaign_id = f"C{st.session_state.next_campaign_id:03d}"
-    st.session_state.next_campaign_id += 1
-    st.session_state.campaigns.append({
-        "id": campaign_id, "name": name, "goal": goal,
-        "target_segment_description": target_segment_desc,
-        "offer_details": offer_details,
-        "status": "Planning", # Planning, Active, Paused, Completed
-        "start_date": None, "end_date": None,
-        "assigned_leads_count": 0,
-        "target_leads_count": target_leads_count
-    })
-    st.session_state.campaign_performance[campaign_id] = {
-        "calls_made": 0, "successful_conversions": 0, "total_revenue": 0,
-        "engagement_score_sum": 0, "leads_contacted": 0
+    event = {
+        "id": event_id, "name": name, "type": event_type, "status": "Planning",
+        "target_audience_description": target_audience_desc,
+        "goals": goals, # List of strings
+        "content_highlights": content_highlights,
+        "promo_channels": promo_channels, # List of strings
+        "budget_allocated": budget,
+        "event_date": event_date,
+        "promo_start_date": promo_start_date,
+        "early_bird_ends_date": early_bird_ends_date,
+        "reminder_1_date": reminder_1_date,
+        "reminder_2_date": reminder_2_date,
+        "promotions_sent_count": 0,
+        "reminders_sent_count": 0,
+        "simulated_promo_effectiveness": random.uniform(0.01, 0.05) # Base % of targeted audience that might register per promo wave
     }
-    log_event_campaign(f"Campaign '{name}' created with ID {campaign_id}.")
-    return campaign_id
+    st.session_state.events.append(event)
+    st.session_state.event_registrations[event_id] = set()
+    st.session_state.event_attendance[event_id] = set()
+    st.session_state.event_performance_metrics[event_id] = {
+        "registrations": 0, "attendance": 0, "leads_generated": 0, "cost_incurred": 0,
+        "estimated_revenue_impact": 0, "promo_reach": 0
+    }
+    log_event_activity(f"Event Campaign '{name}' (ID: {event_id}) created for {event_date.strftime('%Y-%m-%d')}.")
+    return event_id
 
-def assign_leads_to_campaign(campaign_id, num_leads_to_assign):
-    """Assigns best available leads to a campaign based on simple criteria."""
-    campaign = next((c for c in st.session_state.campaigns if c["id"] == campaign_id), None)
-    if not campaign: return 0
+def get_target_audience_for_event(event, audience_pool, max_target_count=500):
+    """Agentic AI: Selects a target audience based on event description and audience profiles."""
+    # Simple keyword matching for now
+    target_audience = []
+    event_keywords = set(tag.lower() for tag in event.get("target_audience_description", "").replace(",", " ").split() if tag in AUDIENCE_INTEREST_TAGS)
+    if not event_keywords and event.get("type"): # Fallback to event type
+        event_keywords.add(event["type"].split()[0].lower())
 
-    # Simple targeting: prioritize higher profile_score leads not yet in a campaign
-    available_leads = [l for l in st.session_state.leads if l["status"] == "New" and not l["assigned_campaign_id"]]
-    available_leads.sort(key=lambda x: x["profile_score"], reverse=True)
 
-    assigned_count = 0
-    for lead in available_leads[:num_leads_to_assign]:
-        lead["assigned_campaign_id"] = campaign_id
-        lead["status"] = "Queued for Campaign"
-        # Agentic AI: Calculate initial priority score
-        lead["priority_score"] = calculate_lead_priority(lead, campaign)
-        campaign["assigned_leads_count"] +=1
-        assigned_count += 1
-    log_event_campaign(f"Assigned {assigned_count} leads to campaign {campaign['name']}.")
-    return assigned_count
-
-def calculate_lead_priority(lead, campaign):
-    """Agentic AI: Calculates a priority score for a lead within a campaign."""
-    score = lead["profile_score"]
-    # Adjust based on campaign goal (simplified)
-    if campaign["goal"] == "Sales Conversion" and lead["source"] == "Past Purchase":
-        score += 20
-    elif campaign["goal"] == "Lead Generation" and lead["source"] == "Website Signup":
-        score += 10
-    # Add other factors like recency, specific keywords in (simulated) lead details, etc.
-    return min(150, score) # Cap score
-
-def get_next_best_lead_for_agent(agent, campaign_id):
-    """Agentic AI: Finds the best lead for an agent from a specific campaign."""
-    campaign_leads = [
-        l for l in st.session_state.leads
-        if l["assigned_campaign_id"] == campaign_id and l["status"] == "Queued for Campaign"
-    ]
-    if not campaign_leads:
-        return None
-
-    # Sort by priority score (higher is better)
-    campaign_leads.sort(key=lambda x: x["priority_score"], reverse=True)
-
-    # Basic skill matching (can be expanded)
-    best_lead = None
-    for lead in campaign_leads:
-        # Simple: if agent has a relevant skill for high value or retention, prefer those leads
-        if "High-Value Sales" in agent["skills"] and lead["potential_value"] > 500:
-            best_lead = lead
-            break
-        if "Retention" in agent["skills"] and lead["source"] == "Past Purchase": # Assuming retention campaigns target past purchasers
-             best_lead = lead
-             break
+    for member in audience_pool:
+        member_interests = set(tag.lower() for tag in member["interest_tags"])
+        if event_keywords & member_interests: # If any overlap
+            # Prioritize higher engagement score and recency
+            score = member["engagement_score"] - member["last_promo_interaction_days_ago"]/10
+            target_audience.append((score, member))
     
-    return best_lead if best_lead else campaign_leads[0] # Default to highest priority if no specific skill match
-
-def simulate_call_attempt(agent, lead, campaign):
-    """Simulates a call and its outcome."""
-    agent["status"] = "On Call"
-    agent["current_call_id"] = lead["id"]
-    lead["status"] = "Contact Attempted"
-    lead["last_contact_date"] = st.session_state.simulation_time_campaign
-
-    # Modify base outcome probabilities
-    current_outcomes = CALL_OUTCOMES.copy()
-    # Higher profile score & priority increases chance of positive outcome
-    positive_boost = (lead["profile_score"] / 500) + (lead["priority_score"] / 750) # Max ~0.2 + ~0.2 = 0.4
-    
-    current_outcomes["Sale Made"] += positive_boost * 0.5 # Sale is harder
-    current_outcomes["Interested - No Sale Yet"] += positive_boost * 0.7
-    current_outcomes["Follow-up Required"] += positive_boost * 0.3
-    current_outcomes["Not Interested"] -= positive_boost * 0.6
-    current_outcomes["No Answer"] -= positive_boost * 0.2
-
-    # Normalize probabilities
-    for k in current_outcomes: current_outcomes[k] = max(0.01, current_outcomes[k]) # Ensure no negative/zero prob
-    total_prob = sum(current_outcomes.values())
-    normalized_outcomes = {k: v / total_prob for k, v in current_outcomes.items()}
-
-    outcomes, probabilities = zip(*normalized_outcomes.items())
-    call_result = np.random.choice(outcomes, p=probabilities)
-
-    # Update stats
-    st.session_state.campaign_performance[campaign["id"]]["calls_made"] += 1
-    agent["calls_made_today"] += 1
-    revenue_earned = 0
-    engagement_points = 0
-
-    if call_result == "Sale Made":
-        lead["status"] = "Converted"
-        revenue_earned = lead["potential_value"] * random.uniform(0.8, 1.2) # Actual sale value
-        st.session_state.campaign_performance[campaign["id"]]["successful_conversions"] += 1
-        st.session_state.campaign_performance[campaign["id"]]["total_revenue"] += revenue_earned
-        agent["successful_conversions"] += 1
-        engagement_points = 100
-    elif call_result == "Interested - No Sale Yet":
-        lead["status"] = "Nurturing"
-        engagement_points = 70
-    elif call_result == "Follow-up Required":
-        lead["status"] = "Nurturing" # Or a specific "Follow-up" status
-        engagement_points = 50
-    elif call_result == "Not Interested":
-        lead["status"] = "Lost"
-        engagement_points = 10
-    else: # No Answer
-        lead["status"] = "Queued for Campaign" # Re-queue for another attempt (or handle differently)
-        engagement_points = 5
-    
-    if lead["status"] != "Queued for Campaign": # If not re-queued
-         st.session_state.campaign_performance[campaign["id"]]["leads_contacted"] += 1
-
-    st.session_state.campaign_performance[campaign["id"]]["engagement_score_sum"] += engagement_points
-
-    st.session_state.call_log.append({
-        "timestamp": st.session_state.simulation_time_campaign,
-        "agent_id": agent["id"], "agent_name": agent["name"],
-        "lead_id": lead["id"], "lead_name": lead["name"],
-        "campaign_id": campaign["id"], "campaign_name": campaign["name"],
-        "outcome": call_result, "revenue": revenue_earned, "engagement": engagement_points
-    })
-    log_event_campaign(f"Agent {agent['name']} called Lead {lead['name']} for Campaign '{campaign['name']}'. Outcome: {call_result}. Revenue: ${revenue_earned:.2f}")
-
-    # Simulate wrap-up time
-    # For simplicity, agent becomes available in the next step or after a fixed time
-    agent["status"] = "Available" # Simplified: becomes available immediately for next sim step
-    agent["current_call_id"] = None
+    target_audience.sort(key=lambda x: x[0], reverse=True)
+    return [m[1] for m in target_audience[:max_target_count]]
 
 
-def run_simulation_step_campaign():
-    st.session_state.simulation_time_campaign += timedelta(minutes=15) # Each step is 15 mins
-    log_event_campaign(f"--- Simulation Step: Time {st.session_state.simulation_time_campaign.strftime('%H:%M')} ---")
+def simulate_event_campaign_step():
+    st.session_state.system_time += timedelta(days=1) # Simulate daily steps
+    log_event_activity(f"--- System Day: {st.session_state.system_time.strftime('%Y-%m-%d')} ---")
 
-    active_campaigns = [c for c in st.session_state.campaigns if c["status"] == "Active"]
-    available_agents = [a for a in st.session_state.agents if a["status"] == "Available"]
+    for event in st.session_state.events:
+        if event["status"] in ["Completed", "Cancelled"]:
+            continue
 
-    if not active_campaigns:
-        log_event_campaign("No active campaigns to process.")
-        return
-    if not available_agents:
-        log_event_campaign("No agents available to make calls.")
-        return
+        metrics = st.session_state.event_performance_metrics[event["id"]]
 
-    # Assign calls fairly or based on campaign priority
-    for agent in available_agents:
-        # Simple: pick the first active campaign, or could be more complex
-        # For now, let agents pick from any active campaign, or assign them dedicated campaigns
-        # This round-robin attempt across campaigns for each agent
-        for campaign in active_campaigns:
-            if agent["status"] != "Available": break # Agent took a call
+        # Promotion Phase
+        if event["status"] == "Active - Promotion" and st.session_state.system_time >= event["promo_start_date"] and st.session_state.system_time < event["event_date"]:
+            if event["promotions_sent_count"] < 3: # Limit promo blasts
+                targeted_audience = get_target_audience_for_event(event, st.session_state.audience_pool, 200 * (event["promotions_sent_count"] + 1))
+                metrics["promo_reach"] = max(metrics["promo_reach"], len(targeted_audience))
+                
+                new_registrations_this_wave = 0
+                for member in targeted_audience:
+                    if member["id"] not in st.session_state.event_registrations[event["id"]]:
+                        # Probability based on engagement, event appeal (effectiveness), and if early bird is active
+                        reg_prob = event["simulated_promo_effectiveness"] + (member["engagement_score"] / 2000)
+                        if st.session_state.system_time <= event["early_bird_ends_date"]:
+                            reg_prob *= 1.5 # Early bird boost
 
-            next_lead = get_next_best_lead_for_agent(agent, campaign["id"])
-            if next_lead:
-                simulate_call_attempt(agent, next_lead, campaign)
-                break # Agent makes one call per step for simplicity
-    
-    # Check for campaign completion (simplified)
-    for campaign in active_campaigns:
-        perf = st.session_state.campaign_performance[campaign["id"]]
-        if perf["calls_made"] >= campaign["target_leads_count"] * 1.5 : # e.g., target 50 leads, allow 75 calls
-            # campaign["status"] = "Completed" # Or based on actual leads processed.
-            # For this example, let's assume target leads count means distinct leads to try to contact
-            if perf["leads_contacted"] >= campaign["target_leads_count"]:
-                 campaign["status"] = "Completed"
-                 log_event_campaign(f"Campaign {campaign['name']} marked as completed (target leads contacted).")
+                        if random.random() < reg_prob:
+                            st.session_state.event_registrations[event["id"]].add(member["id"])
+                            new_registrations_this_wave +=1
+                
+                metrics["registrations"] = len(st.session_state.event_registrations[event["id"]])
+                metrics["cost_incurred"] += event["budget_allocated"] * 0.1 # Assume 10% budget per promo wave
+                event["promotions_sent_count"] += 1
+                log_event_activity(f"Event '{event['name']}': Promo wave {event['promotions_sent_count']} sent. {new_registrations_this_wave} new registrations. Total: {metrics['registrations']}")
+        
+        # Reminder Phase
+        if event["status"] == "Active - Promotion" and metrics["registrations"] > 0:
+            if st.session_state.system_time == event["reminder_1_date"] or st.session_state.system_time == event["reminder_2_date"]:
+                event["reminders_sent_count"] += 1
+                metrics["cost_incurred"] += event["budget_allocated"] * 0.02 # Small cost for reminders
+                log_event_activity(f"Event '{event['name']}': Reminder {event['reminders_sent_count']} sent to {metrics['registrations']} registrants.")
+
+        # Event Day - Simulate Attendance
+        if st.session_state.system_time == event["event_date"]:
+            event["status"] = "Event Day"
+            registered_ids = st.session_state.event_registrations[event["id"]]
+            attended_count = 0
+            for reg_id in registered_ids:
+                # Show-up probability (e.g. 50-80%)
+                if random.random() < (0.65 + random.uniform(-0.15, 0.15)): # Average 65% show-up
+                    st.session_state.event_attendance[event["id"]].add(reg_id)
+                    attended_count +=1
+            metrics["attendance"] = attended_count
+            log_event_activity(f"Event '{event['name']}' is TODAY! {attended_count} out of {metrics['registrations']} attended.")
+            event["status"] = "Post-Event" # Move to post-event phase for next day's processing
+
+        # Post-Event Phase (Lead Gen, Revenue)
+        if event["status"] == "Post-Event" and st.session_state.system_time > event["event_date"]:
+            if metrics["leads_generated"] == 0 and metrics["attendance"] > 0: # Simulate once
+                attendee_ids = st.session_state.event_attendance[event["id"]]
+                leads_from_event = 0
+                revenue_from_event = 0
+                for aud_id in attendee_ids:
+                    member = next((m for m in st.session_state.audience_pool if m["id"] == aud_id), None)
+                    if member:
+                        # Lead conversion probability (e.g., 10-30% of attendees become leads)
+                        if random.random() < (0.2 + (member["engagement_score"] / 1000)):
+                            leads_from_event += 1
+                            # Revenue from converted lead
+                            if member["potential_value"] > 0 and random.random() < 0.5: # 50% of leads with potential convert to value
+                                revenue_from_event += member["potential_value"] * random.uniform(0.7,1.0)
+                
+                metrics["leads_generated"] = leads_from_event
+                metrics["estimated_revenue_impact"] = revenue_from_event
+                metrics["cost_incurred"] += event["budget_allocated"] * 0.05 # Post-event follow-up cost
+                log_event_activity(f"Event '{event['name']}': Post-event processing. Leads: {leads_from_event}, Est. Revenue: ${revenue_from_event:,.2f}")
+                event["status"] = "Completed" # Mark as fully completed after post-event actions
+
+        # Risk Assessment (Agentic AI)
+        if event["status"] == "Active - Promotion" and st.session_state.system_time < event["event_date"] - timedelta(days=7):
+            days_into_promo = (st.session_state.system_time - event["promo_start_date"]).days
+            expected_reg_velocity = (event["budget_allocated"] / 5000) * 10 # Arbitrary: Higher budget = higher expected daily reg
+            if days_into_promo > 3 and metrics["registrations"] < (expected_reg_velocity * days_into_promo * 0.5): # Less than 50% of expected
+                 log_event_activity(f"RISK: Event '{event['name']}' has low registration velocity ({metrics['registrations']} regs after {days_into_promo} promo days).")
 
 
 # --- Streamlit UI ---
-
 # Sidebar
 with st.sidebar:
     st.header("⚙️ System Setup & Controls")
-    # API Key Input (primarily for local testing if secrets not available)
     if not (hasattr(st, 'secrets') and "gemini_api" in st.secrets):
-        st.session_state.gemini_api_key_campaign = st.text_input(
-            "Google AI Studio API Key (Campaigns)",
-            type="password",
-            value=st.session_state.gemini_api_key_campaign,
-            key="gemini_api_key_c",
-            help="Enter if 'gemini_api' not in Streamlit secrets."
+        st.session_state.gemini_api_key_event = st.text_input(
+            "Google AI API Key (Events)", type="password", value=st.session_state.gemini_api_key_event, key="gemini_api_key_evt"
         )
 
-    st.subheader("🚀 Manage Campaigns")
-    with st.expander("Create New Campaign", expanded=False):
-        with st.form("new_campaign_form", clear_on_submit=True):
-            c_name = st.text_input("Campaign Name", f"Q{datetime.now().month} Sales Drive")
-            c_goal = st.selectbox("Campaign Goal", CAMPAIGN_GOALS)
-            c_target_desc = st.text_area("Target Segment Description", "Customers interested in new tech products, high engagement score.")
-            c_offer = st.text_area("Offer Details", "20% off new XYZ gadget, free shipping.")
-            c_num_leads = st.number_input("Target Number of Leads to Contact", 10, 1000, 50)
-            submitted_campaign = st.form_submit_button("Create Campaign")
-            if submitted_campaign and c_name:
-                create_campaign(c_name, c_goal, c_target_desc, c_offer, c_num_leads)
-                st.success(f"Campaign '{c_name}' created.")
+    st.subheader("🎉 Create New Event Campaign")
+    with st.expander("Event Details Form", expanded=False):
+        with st.form("new_event_form", clear_on_submit=True):
+            evt_name = st.text_input("Event Name", f"My Awesome {random.choice(EVENT_TYPES)}")
+            evt_type = st.selectbox("Event Type", EVENT_TYPES)
+            evt_target_desc = st.text_area("Target Audience Description", "Professionals interested in AI and Marketing, mid-career.")
+            evt_goals = st.multiselect("Event Goals", ["Lead Generation", "Brand Awareness", "Sales", "Networking"])
+            evt_content = st.text_area("Key Content/Speakers", "Keynote by Dr. AI, Workshop on Prompt Engineering.")
+            evt_promo_channels = st.multiselect("Promotion Channels", PROMO_CHANNELS, default=PROMO_CHANNELS[:2])
+            evt_budget = st.number_input("Allocated Budget ($)", 100, 10000, 1000, 100)
+            evt_date_offset = st.slider("Event Date (days from today)", 7, 90, 30)
+            submitted_event = st.form_submit_button("Create Event Campaign")
+            if submitted_event and evt_name:
+                create_event_campaign(evt_name, evt_type, evt_target_desc, evt_goals, evt_content, evt_promo_channels, evt_budget, evt_date_offset)
+                st.success(f"Event '{evt_name}' created.")
 
-    if st.session_state.campaigns:
-        selected_campaign_id_action = st.selectbox(
-            "Select Campaign for Actions",
-            options=[c["id"] for c in st.session_state.campaigns],
-            format_func=lambda x: next(c["name"] for c in st.session_state.campaigns if c["id"] == x),
-            key="sel_camp_action_sb"
-        )
-        campaign_to_act_on = next((c for c in st.session_state.campaigns if c["id"] == selected_campaign_id_action), None)
-        if campaign_to_act_on:
-            if campaign_to_act_on["status"] == "Planning":
-                if st.button(f"🚀 Activate Campaign: {campaign_to_act_on['name']}", key=f"act_{selected_campaign_id_action}"):
-                    num_assigned = assign_leads_to_campaign(selected_campaign_id_action, campaign_to_act_on["target_leads_count"])
-                    if num_assigned > 0:
-                        campaign_to_act_on["status"] = "Active"
-                        campaign_to_act_on["start_date"] = st.session_state.simulation_time_campaign
-                        log_event_campaign(f"Campaign {campaign_to_act_on['name']} activated.")
-                        st.rerun()
-                    else:
-                        st.warning("No new leads available to assign for activation.")
-
-            elif campaign_to_act_on["status"] == "Active":
-                if st.button(f"⏸️ Pause Campaign: {campaign_to_act_on['name']}", key=f"pause_{selected_campaign_id_action}"):
-                    campaign_to_act_on["status"] = "Paused"
-                    log_event_campaign(f"Campaign {campaign_to_act_on['name']} paused.")
-                    st.rerun()
-            elif campaign_to_act_on["status"] == "Paused":
-                 if st.button(f"▶️ Resume Campaign: {campaign_to_act_on['name']}", key=f"resume_{selected_campaign_id_action}"):
-                    campaign_to_act_on["status"] = "Active"
-                    log_event_campaign(f"Campaign {campaign_to_act_on['name']} resumed.")
-                    st.rerun()
-
-
-    st.subheader("👥 Manage Agents")
-    with st.expander("Add New Agent", expanded=False):
-        with st.form("new_agent_form_campaign", clear_on_submit=True):
-            a_name = st.text_input("Agent Name", f"Agent {st.session_state.next_agent_id_campaign}")
-            a_skills = st.multiselect("Agent Skills", AGENT_SKILLS, default=[AGENT_SKILLS[0]])
-            submitted_agent = st.form_submit_button("Add Agent")
-            if submitted_agent and a_name and a_skills:
-                add_agent_campaign(a_name, a_skills)
-                st.success(f"Agent '{a_name}' added.")
-
-    st.subheader("💧 Manage Leads")
-    num_leads_to_gen = st.number_input("Generate Random Leads", 0, 100, 10, key="gen_leads_sb")
-    if st.button("Generate Leads", key="gen_leads_btn_sb"):
-        for _ in range(num_leads_to_gen):
-            st.session_state.leads.append(generate_random_lead())
-        log_event_campaign(f"Generated {num_leads_to_gen} new random leads.")
+    st.subheader("👥 Manage Audience Pool")
+    num_audience_to_gen = st.number_input("Generate Random Audience Members", 0, 200, 20, key="gen_aud_sb")
+    if st.button("Generate Audience", key="gen_aud_btn_sb"):
+        for _ in range(num_audience_to_gen):
+            st.session_state.audience_pool.append(generate_random_audience_member())
+        log_event_activity(f"Generated {num_audience_to_gen} new audience members.")
         st.rerun()
-
+    st.caption(f"Current Audience Pool Size: {len(st.session_state.audience_pool)}")
 
     st.subheader("⚙️ Simulation Control")
-    if st.session_state.simulation_running_campaign:
-        if st.button("⏹️ Pause Simulation", key="pause_sim_c"):
-            st.session_state.simulation_running_campaign = False
-            log_event_campaign("Simulation Paused.")
+    if st.session_state.simulation_running_event:
+        if st.button("⏹️ Pause Simulation", key="pause_sim_evt"):
+            st.session_state.simulation_running_event = False
+            log_event_activity("Simulation Paused.")
             st.rerun()
     else:
-        if st.button("▶️ Run Simulation", key="run_sim_c"):
-            if not st.session_state.agents: st.warning("Add agents to run simulation."); st.stop()
-            if not any(c["status"]=="Active" for c in st.session_state.campaigns): st.warning("Activate a campaign to run simulation."); st.stop()
-            st.session_state.simulation_running_campaign = True
-            log_event_campaign("Simulation Started/Resumed.")
+        if st.button("▶️ Run Simulation", key="run_sim_evt"):
+            if not st.session_state.events: st.warning("Create an event first!"); st.stop()
+            if not st.session_state.audience_pool: st.warning("Generate audience members first!"); st.stop()
+            st.session_state.simulation_running_event = True
+            log_event_activity("Simulation Started/Resumed.")
             st.rerun()
 
-    if not st.session_state.simulation_running_campaign:
-            if st.button("⏭️ Simulate Next Step", key="next_step_c"):
-                if not st.session_state.agents: st.warning("Add agents to run simulation."); st.stop()
-                if not any(c["status"]=="Active" for c in st.session_state.campaigns): st.warning("Activate a campaign to run simulation."); st.stop()
-                run_simulation_step_campaign()
+    if not st.session_state.simulation_running_event:
+            if st.button("⏭️ Simulate Next Day", key="next_day_evt"):
+                if not st.session_state.events: st.warning("Create an event first!"); st.stop()
+                if not st.session_state.audience_pool: st.warning("Generate audience members first!"); st.stop()
+                simulate_event_campaign_step()
                 st.rerun()
 
-    simulation_speed_campaign = st.slider("Sim Speed (steps/sec)", 0.1, 2.0, 0.5, 0.1, key="sim_speed_c", disabled=not st.session_state.simulation_running_campaign)
+    simulation_speed_event = st.slider("Sim Speed (days/sec)", 0.1, 2.0, 0.5, 0.1, key="sim_speed_evt", disabled=not st.session_state.simulation_running_event)
 
-    st.subheader("📜 System Log")
-    log_container_c = st.container(height=200)
-    for log_c in reversed(st.session_state.system_log_campaign):
-        log_container_c.caption(log_c)
-
+    st.subheader("📜 System Activity Log")
+    log_container_evt = st.container(height=200)
+    for log_e in reversed(st.session_state.system_log_event):
+        log_container_evt.caption(log_e)
 
 # Main Application Area
-st.title("📞 Intelligent Call Campaign Management System")
-st.markdown(f"**Simulation Time: {st.session_state.simulation_time_campaign.strftime('%A, %B %d, %Y %H:%M')}**")
+st.title("🎉 Intelligent Event Campaign Management System")
+st.markdown(f"**System Date: {st.session_state.system_time.strftime('%A, %B %d, %Y')}**")
 
-tab_overview, tab_campaigns, tab_leads, tab_agents, tab_ai_insights = st.tabs([
-    "📊 Overview", "🚀 Campaigns", "💧 Leads", "👥 Agents", "💡 AI Optimizer"
+tab_dashboard, tab_event_list, tab_audience, tab_ai_optimizer = st.tabs([
+    "📊 Dashboard", "🗓️ Event Campaigns", "👥 Audience Insights", "💡 AI Optimizer"
 ])
 
-with tab_overview:
-    st.header("Overall Performance Snapshot")
-    if not st.session_state.call_log:
-        st.info("No calls made yet. Run the simulation to see data.")
+with tab_dashboard:
+    st.header("Overall Event Ecosystem Snapshot")
+    if not st.session_state.events:
+        st.info("No event campaigns created yet.")
     else:
-        total_calls = sum(perf["calls_made"] for perf in st.session_state.campaign_performance.values())
-        total_conversions = sum(perf["successful_conversions"] for perf in st.session_state.campaign_performance.values())
-        total_revenue_all = sum(perf["total_revenue"] for perf in st.session_state.campaign_performance.values())
-        
-        avg_engagement = 0
-        total_engagement_sum = sum(perf["engagement_score_sum"] for perf in st.session_state.campaign_performance.values())
-        total_leads_contacted_all = sum(perf["leads_contacted"] for perf in st.session_state.campaign_performance.values())
-        if total_leads_contacted_all > 0:
-            avg_engagement = total_engagement_sum / total_leads_contacted_all
-
+        active_events = len([e for e in st.session_state.events if e["status"] not in ["Completed", "Cancelled", "Planning"]])
+        total_registrations_all = sum(m.get("registrations",0) for m in st.session_state.event_performance_metrics.values())
+        total_attendance_all = sum(m.get("attendance",0) for m in st.session_state.event_performance_metrics.values())
+        total_revenue_impact_all = sum(m.get("estimated_revenue_impact",0) for m in st.session_state.event_performance_metrics.values())
+        total_cost_all = sum(m.get("cost_incurred",0) for m in st.session_state.event_performance_metrics.values())
 
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Total Calls Made", total_calls)
-        col2.metric("Total Conversions", total_conversions)
-        col3.metric("Total Revenue", f"${total_revenue_all:,.2f}")
-        col4.metric("Avg. Engagement/Contacted Lead", f"{avg_engagement:.1f}")
+        col1.metric("Total Events Managed", len(st.session_state.events))
+        col2.metric("Active Event Campaigns", active_events)
+        col3.metric("Total Registrations (All Events)", f"{total_registrations_all:,}")
+        col4.metric("Total Attendance (All Events)", f"{total_attendance_all:,}")
+        
+        col5, col6, col7, _ = st.columns(4)
+        col5.metric("Total Leads Generated (All)", f"{sum(m.get('leads_generated',0) for m in st.session_state.event_performance_metrics.values()):,}")
+        col6.metric("Total Est. Revenue Impact", f"${total_revenue_impact_all:,.2f}")
+        col7.metric("Total Campaign Costs", f"${total_cost_all:,.2f}")
 
-        st.subheader("Recent Call Log")
-        call_df = pd.DataFrame(st.session_state.call_log)
-        if not call_df.empty:
-            st.dataframe(call_df.tail(10).iloc[::-1], use_container_width=True) # Show last 10, newest first
+        st.subheader("Upcoming Events (Next 30 Days)")
+        upcoming_events_df = pd.DataFrame([
+            {"ID": e["id"], "Name": e["name"], "Type": e["type"], "Event Date": e["event_date"].strftime("%Y-%m-%d"), "Status": e["status"], "Registrations": st.session_state.event_performance_metrics[e["id"]].get("registrations",0)}
+            for e in st.session_state.events
+            if e["event_date"] >= st.session_state.system_time and e["event_date"] <= st.session_state.system_time + timedelta(days=30)
+        ]).sort_values(by="Event Date")
+        if not upcoming_events_df.empty:
+            st.dataframe(upcoming_events_df, use_container_width=True)
+        else:
+            st.info("No events scheduled in the next 30 days.")
 
-with tab_campaigns:
-    st.header("Campaign Details & Performance")
-    if not st.session_state.campaigns:
-        st.info("No campaigns created yet. Create one from the sidebar.")
+with tab_event_list:
+    st.header("All Event Campaigns")
+    if not st.session_state.events:
+        st.info("No event campaigns created yet. Create one from the sidebar.")
     else:
-        campaign_data_display = []
-        for camp in st.session_state.campaigns:
-            perf = st.session_state.campaign_performance.get(camp["id"], {})
-            avg_camp_engagement = (perf.get("engagement_score_sum",0) / perf.get("leads_contacted",1)) if perf.get("leads_contacted",0) > 0 else 0
-            conversion_rate = (perf.get("successful_conversions",0) / perf.get("leads_contacted",1)) * 100 if perf.get("leads_contacted",0) > 0 else 0
+        event_data_display = []
+        for event in st.session_state.events:
+            metrics = st.session_state.event_performance_metrics.get(event["id"], {})
+            show_up_rate = (metrics.get("attendance", 0) / metrics.get("registrations", 1)) * 100 if metrics.get("registrations", 0) > 0 else 0
+            cost_per_attendee = metrics.get("cost_incurred", 0) / metrics.get("attendance", 1) if metrics.get("attendance", 0) > 0 else 0
+            
+            # Action buttons
+            actions = []
+            if event["status"] == "Planning":
+                actions.append(f"<button name='activate_event' value='{event['id']}'>🚀 Activate</button>")
+            elif "Active" in event["status"]:
+                 actions.append(f"<button name='pause_event' value='{event['id']}'>⏸️ Pause</button>")
+            elif event["status"] == "Paused":
+                 actions.append(f"<button name='resume_event' value='{event['id']}'>▶️ Resume</button>")
+            # For a real app, these buttons would trigger callbacks. Here, we'd need more complex state handling or forms.
+            # For simplicity, actions are illustrative. Actual activation is via status change in simulation.
 
-            campaign_data_display.append({
-                "ID": camp["id"], "Name": camp["name"], "Goal": camp["goal"], "Status": camp["status"],
-                "Target Leads": camp["target_leads_count"],
-                "Leads Contacted": perf.get("leads_contacted", 0),
-                "Calls": perf.get("calls_made", 0),
-                "Conversions": perf.get("successful_conversions", 0),
-                "Revenue": f"${perf.get('total_revenue', 0):,.2f}",
-                "Avg. Engagement": f"{avg_camp_engagement:.1f}",
-                "Conv. Rate (%)": f"{conversion_rate:.1f}%"
+            event_data_display.append({
+                "ID": event["id"], "Name": event["name"], "Type": event["type"],
+                "Event Date": event["event_date"].strftime("%Y-%m-%d"), "Status": event["status"],
+                "Regs": metrics.get("registrations", 0),
+                "Attendance": metrics.get("attendance", 0),
+                "Show-up %": f"{show_up_rate:.1f}%",
+                "Leads": metrics.get("leads_generated", 0),
+                "Cost": f"${metrics.get('cost_incurred', 0):,.0f}",
+                "CPA": f"${cost_per_attendee:,.2f}",
+                "Revenue": f"${metrics.get('estimated_revenue_impact', 0):,.0f}",
+                # "Actions": " ".join(actions) # Illustrative
             })
-        st.dataframe(pd.DataFrame(campaign_data_display), use_container_width=True)
+        
+        df_events = pd.DataFrame(event_data_display)
+        st.dataframe(df_events, use_container_width=True) # unsafe_allow_html=True for buttons
 
-with tab_leads:
-    st.header("Lead Management")
-    if not st.session_state.leads:
-        st.info("No leads available. Generate some from the sidebar.")
+        # Logic for activating an event (simplified here - better in sidebar with forms)
+        for e in st.session_state.events:
+            if e["status"] == "Planning" and st.session_state.system_time >= (e["event_date"] - timedelta(days=45)): # Auto-plan activation
+                if st.button(f"🚀 Activate Campaign: {e['name']}", key=f"activate_{e['id']}"):
+                     e["status"] = "Active - Promotion"
+                     log_event_activity(f"Event '{e['name']}' promo phase activated.")
+                     st.rerun()
+
+
+with tab_audience:
+    st.header("Audience Pool Insights")
+    if not st.session_state.audience_pool:
+        st.info("Audience pool is empty. Generate some members from the sidebar.")
     else:
-        # Add filters for leads
-        status_filter = st.multiselect("Filter by Status:", options=list(set(l['status'] for l in st.session_state.leads)), key="lead_status_filter")
-        campaign_filter_lead = st.selectbox("Filter by Campaign:", options=["All"] + [c['id'] + " - " + c['name'] for c in st.session_state.campaigns], key="lead_camp_filter")
+        st.metric("Total Audience Members in Pool", len(st.session_state.audience_pool))
+        
+        # Display a sample of the audience pool
+        audience_df_sample = pd.DataFrame(st.session_state.audience_pool).sample(min(len(st.session_state.audience_pool), 20))
+        st.dataframe(audience_df_sample[["id", "name", "interest_tags", "engagement_score", "potential_value"]], use_container_width=True)
+        
+        # TODO: Add charts for interest distribution, engagement scores, etc.
 
-        filtered_leads = st.session_state.leads
-        if status_filter:
-            filtered_leads = [l for l in filtered_leads if l['status'] in status_filter]
-        if campaign_filter_lead != "All":
-            camp_id_to_filter = campaign_filter_lead.split(" - ")[0]
-            filtered_leads = [l for l in filtered_leads if l['assigned_campaign_id'] == camp_id_to_filter]
+with tab_ai_optimizer:
+    st.header("💡 Gemini AI Event Optimizer")
+    st.markdown("Get AI-powered insights to enhance your event strategies.")
 
-        st.metric("Displaying Leads", len(filtered_leads))
-        lead_df_display = pd.DataFrame(filtered_leads)[["id", "name", "source", "profile_score", "priority_score", "status", "assigned_campaign_id", "potential_value"]]
-        st.dataframe(lead_df_display, use_container_width=True)
-
-
-with tab_agents:
-    st.header("Agent Roster & Performance")
-    if not st.session_state.agents:
-        st.info("No agents added yet. Add agents from the sidebar.")
-    else:
-        agent_data_display = []
-        for agent in st.session_state.agents:
-            agent_data_display.append({
-                "ID": agent["id"], "Name": agent["name"], "Skills": ", ".join(agent["skills"]),
-                "Status": agent["status"],
-                "Current Call Lead ID": agent["current_call_id"][:5] if agent["current_call_id"] else "N/A",
-                "Calls Today": agent["calls_made_today"],
-                "Conversions Today": agent["successful_conversions"]
-            })
-        st.dataframe(pd.DataFrame(agent_data_display), use_container_width=True)
-
-with tab_ai_insights:
-    st.header("💡 Gemini AI Campaign Optimizer")
-    st.markdown("Get AI-powered recommendations to enhance your campaign strategies.")
-
-    selected_campaign_id_ai = st.selectbox(
-        "Select Campaign for AI Analysis:",
-        options=["All Active Campaigns"] + [c["id"] + " - " + c["name"] for c in st.session_state.campaigns if c["status"] != "Planning"],
-        key="sel_camp_ai"
+    selected_event_id_ai = st.selectbox(
+        "Select Event for AI Analysis:",
+        options=["Overall Event Strategy"] + [e["id"] + " - " + e["name"] for e in st.session_state.events if e["status"] != "Planning"],
+        key="sel_event_ai"
     )
 
-    if st.button("🤖 Analyze and Suggest Optimizations", key="gemini_opt_btn"):
-        # Prepare data for Gemini
-        prompt_data = "Current Campaign System State:\n"
-        prompt_data += f"- Simulation Time: {st.session_state.simulation_time_campaign.strftime('%Y-%m-%d %H:%M')}\n"
+    if st.button("🤖 Analyze and Suggest Optimizations", key="gemini_event_opt_btn"):
+        prompt_context = "Current Event Management System State:\n"
+        prompt_context += f"- System Date: {st.session_state.system_time.strftime('%Y-%m-%d')}\n"
         
-        campaigns_to_analyze = []
-        if selected_campaign_id_ai == "All Active Campaigns":
-            campaigns_to_analyze = [c for c in st.session_state.campaigns if c["status"] == "Active"]
+        event_to_analyze = None
+        if selected_event_id_ai != "Overall Event Strategy":
+            evt_id_only = selected_event_id_ai.split(" - ")[0]
+            event_to_analyze = next((e for e in st.session_state.events if e["id"] == evt_id_only), None)
+
+        if event_to_analyze:
+            metrics = st.session_state.event_performance_metrics.get(event_to_analyze["id"],{})
+            prompt_context += f"\nAnalyzing Specific Event: {event_to_analyze['name']} (ID: {event_to_analyze['id']})\n"
+            prompt_context += f"  Type: {event_to_analyze['type']}, Status: {event_to_analyze['status']}\n"
+            prompt_context += f"  Event Date: {event_to_analyze['event_date'].strftime('%Y-%m-%d')}\n"
+            prompt_context += f"  Goals: {', '.join(event_to_analyze['goals'])}\n"
+            prompt_context += f"  Target Audience: {event_to_analyze['target_audience_description']}\n"
+            prompt_context += f"  Content Highlights: {event_to_analyze['content_highlights']}\n"
+            prompt_context += f"  Performance Metrics:\n"
+            prompt_context += f"    Registrations: {metrics.get('registrations',0)}\n"
+            prompt_context += f"    Attendance: {metrics.get('attendance',0)} (Show-up: {(metrics.get('attendance',0)/(metrics.get('registrations',1) or 1)*100):.1f}%)\n"
+            prompt_context += f"    Leads Generated: {metrics.get('leads_generated',0)}\n"
+            prompt_context += f"    Cost Incurred: ${metrics.get('cost_incurred',0):.0f}\n"
+            prompt_context += f"    Est. Revenue Impact: ${metrics.get('estimated_revenue_impact',0):.0f}\n"
+        else: # Overall Strategy
+            prompt_context += f"Analyzing Overall Event Strategy. Total Events: {len(st.session_state.events)}\n"
+            # Could summarize top 2-3 events here if many.
+
+        prompt_context += "\nRecent System Activity (last 5 logs):\n"
+        for log_item in st.session_state.system_log_event[-5:]:
+            prompt_context += f"- {log_item}\n"
+        
+        final_gemini_prompt = (
+            f"{prompt_context}\n\n"
+            "Based on this information, provide:\n"
+            "1. A brief summary of the current event situation/performance.\n"
+            "2. If a specific event is analyzed: Three concrete, actionable recommendations to improve its success (registrations, attendance, ROI). Be specific (e.g., 'For the 'Tech Summit', consider a targeted email to 'AI' interest segment with a special offer for early sign-ups.').\n"
+            "3. If 'Overall Event Strategy' is selected: Three strategic recommendations for the entire event program (e.g., 'Explore co-marketing webinars with partners in the 'Finance' sector to expand reach', or 'Standardize post-event lead nurturing sequence.').\n"
+            "4. Suggest one creative idea for promotional content (e.g., a catchy subject line, a social media post angle, or a unique selling proposition) for the selected event or for a typical upcoming event if overall strategy.\n"
+            "5. Identify one potential risk or missed opportunity and how to address it."
+        )
+        
+        with st.spinner("Gemini is brainstorming event strategies..."):
+            st.session_state.ai_event_recommendations = get_gemini_event_response(final_gemini_prompt, temperature=0.8, max_tokens=800)
+        
+        if st.session_state.ai_event_recommendations:
+            st.success("AI Recommendations Generated!")
         else:
-            camp_id = selected_campaign_id_ai.split(" - ")[0]
-            sel_camp = next((c for c in st.session_state.campaigns if c["id"] == camp_id), None)
-            if sel_camp: campaigns_to_analyze.append(sel_camp)
+            st.error("Failed to get recommendations from Gemini.")
 
-        if not campaigns_to_analyze:
-            st.warning("No suitable campaigns selected or active for analysis.")
-        else:
-            for camp_obj in campaigns_to_analyze:
-                perf = st.session_state.campaign_performance.get(camp_obj["id"], {})
-                prompt_data += f"\nCampaign: {camp_obj['name']} (ID: {camp_obj['id']})\n"
-                prompt_data += f"  Status: {camp_obj['status']}, Goal: {camp_obj['goal']}\n"
-                prompt_data += f"  Target Segment: {camp_obj['target_segment_description']}\n"
-                prompt_data += f"  Offer: {camp_obj['offer_details']}\n"
-                prompt_data += f"  Performance:\n"
-                prompt_data += f"    Calls Made: {perf.get('calls_made',0)}\n"
-                prompt_data += f"    Leads Contacted: {perf.get('leads_contacted',0)}\n"
-                prompt_data += f"    Conversions: {perf.get('successful_conversions',0)}\n"
-                prompt_data += f"    Total Revenue: ${perf.get('total_revenue',0):.2f}\n"
-                avg_eng = (perf.get('engagement_score_sum',0) / perf.get('leads_contacted',1)) if perf.get('leads_contacted',0)>0 else 0
-                prompt_data += f"    Avg. Engagement per Contacted Lead: {avg_eng:.1f}\n"
-
-            prompt_data += "\nRecent Call Log Summary (last 5 calls):\n"
-            for call in st.session_state.call_log[-5:]:
-                 prompt_data += f"- Agent {call['agent_name']} called Lead {call['lead_name']} for {call['campaign_name']}: Outcome {call['outcome']}, Revenue ${call['revenue']:.2f}\n"
-
-
-            final_prompt = (
-                f"{prompt_data}\n\n"
-                "Based on the above data, provide:\n"
-                "1. A concise summary of the current campaign performance (highlight strengths and weaknesses).\n"
-                "2. Three actionable recommendations to improve customer engagement, profit, AND revenue for the selected campaign(s). Be specific (e.g., 'Consider A/B testing offer X vs Y for segment Z', or 'Refine lead prioritization for campaign A to focus on leads with scores > X').\n"
-                "3. If multiple campaigns analyzed, identify any cross-campaign learnings or opportunities.\n"
-                "4. Suggest one specific element (e.g., script opening, offer detail, target audience refinement) that could be A/B tested next, and why."
-            )
-
-            with st.spinner("Gemini is crafting campaign optimization strategies..."):
-                st.session_state.ai_recommendations = get_gemini_campaign_response(final_prompt, temperature=0.7, max_tokens=800)
-            
-            if st.session_state.ai_recommendations:
-                st.success("AI Recommendations Ready!")
-            else:
-                st.error("Failed to get recommendations from Gemini.")
-    
-    if st.session_state.ai_recommendations:
+    if st.session_state.ai_event_recommendations:
         st.markdown("---")
-        st.markdown(st.session_state.ai_recommendations)
+        st.markdown(st.session_state.ai_event_recommendations)
 
 
 # Auto-run simulation loop
-if st.session_state.simulation_running_campaign:
-    active_camps = any(c["status"] == "Active" for c in st.session_state.campaigns)
-    if st.session_state.agents and active_camps:
-        run_simulation_step_campaign()
-        time.sleep(1.0 / simulation_speed_campaign)
+if st.session_state.simulation_running_event:
+    if st.session_state.events and st.session_state.audience_pool:
+        simulate_event_campaign_step()
+        time.sleep(1.0 / simulation_speed_event)
         st.rerun()
     else:
-        if not st.session_state.agents: log_event_campaign("Paused: No agents available.")
-        if not active_camps: log_event_campaign("Paused: No active campaigns.")
-        st.session_state.simulation_running_campaign = False # Auto-pause
+        log_event_activity("Paused: Ensure events and audience pool exist.")
+        st.session_state.simulation_running_event = False
         st.rerun()
