@@ -1,0 +1,15 @@
+streamlit==1.38.0
+shap==0.44.1
+numpy==1.26.4
+pandas==2.2.1
+matplotlib==3.8.3
+seaborn==0.13.2
+google-genai==0.8.0
+scikit-learn==1.4.0
+scipy==1.13.1
+statsmodels==0.14.1
+plotly==5.15.0
+pytz==2024.1
+pip==25.0.1
+openpyxl==3.1.2
+google-generativeai
